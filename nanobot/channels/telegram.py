@@ -91,6 +91,9 @@ class TelegramChannel(BaseChannel):
         self.groq_api_key = groq_api_key
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
+        # Media group buffering: collect album parts before processing
+        self._media_group_buffer: dict[str, list[Update]] = {}
+        self._media_group_timers: dict[str, asyncio.TimerHandle] = {}
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -143,7 +146,13 @@ class TelegramChannel(BaseChannel):
     async def stop(self) -> None:
         """Stop the Telegram bot."""
         self._running = False
-        
+
+        # Cancel pending media group timers
+        for timer in self._media_group_timers.values():
+            timer.cancel()
+        self._media_group_buffer.clear()
+        self._media_group_timers.clear()
+
         if self._app:
             logger.info("Stopping Telegram bot...")
             await self._app.updater.stop()
@@ -192,44 +201,63 @@ class TelegramChannel(BaseChannel):
         )
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming messages (text, photos, voice, documents)."""
+        """Route incoming messages: buffer media groups, process singles immediately."""
         if not update.message or not update.effective_user:
             return
-        
+
+        message = update.message
+
+        if message.media_group_id:
+            group_id = message.media_group_id
+
+            if group_id not in self._media_group_buffer:
+                self._media_group_buffer[group_id] = []
+            self._media_group_buffer[group_id].append(update)
+
+            # Cancel existing timer and set a new one (1s window)
+            existing = self._media_group_timers.get(group_id)
+            if existing:
+                existing.cancel()
+
+            loop = asyncio.get_running_loop()
+            timer = loop.call_later(
+                1.0,
+                lambda gid=group_id: asyncio.ensure_future(self._process_media_group(gid)),
+            )
+            self._media_group_timers[group_id] = timer
+        else:
+            await self._process_single_message(update)
+
+    async def _process_single_message(self, update: Update) -> None:
+        """Process a single (non-media-group) message."""
         message = update.message
         user = update.effective_user
         chat_id = message.chat_id
-        
-        # Use stable numeric ID, but keep username for allowlist compatibility
+
         sender_id = str(user.id)
         if user.username:
             sender_id = f"{sender_id}|{user.username}"
-        
-        # Store chat_id for replies
+
         self._chat_ids[sender_id] = chat_id
-        
-        # Build content from text and/or media
+
         content_parts = []
         media_paths = []
-        
-        # Text content
+
         if message.text:
             content_parts.append(message.text)
         if message.caption:
             content_parts.append(message.caption)
-        
-        # Handle media
+
         file_path, annotation = await self._download_media(message)
         if file_path:
             media_paths.append(file_path)
         if annotation:
             content_parts.append(annotation)
-        
+
         content = "\n".join(content_parts) if content_parts else "[empty message]"
-        
+
         logger.debug(f"Telegram message from {sender_id}: {content[:50]}...")
-        
-        # Forward to the message bus
+
         await self._handle_message(
             sender_id=sender_id,
             chat_id=str(chat_id),
@@ -240,7 +268,64 @@ class TelegramChannel(BaseChannel):
                 "user_id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
-                "is_group": message.chat.type != "private"
+                "is_group": message.chat.type != "private",
+            }
+        )
+
+    async def _process_media_group(self, group_id: str) -> None:
+        """Process a buffered media group as one logical message."""
+        updates = self._media_group_buffer.pop(group_id, [])
+        self._media_group_timers.pop(group_id, None)
+
+        if not updates:
+            return
+
+        # Sort by message_id to maintain order
+        updates.sort(key=lambda u: u.message.message_id)
+
+        first = updates[0]
+        user = first.effective_user
+        chat_id = first.message.chat_id
+
+        sender_id = str(user.id)
+        if user.username:
+            sender_id = f"{sender_id}|{user.username}"
+
+        self._chat_ids[sender_id] = chat_id
+
+        content_parts = []
+        media_paths = []
+
+        # Extract caption (only one message in a group typically has it)
+        for u in updates:
+            if u.message.caption:
+                content_parts.append(u.message.caption)
+                break
+
+        # Download all media items
+        for u in updates:
+            file_path, annotation = await self._download_media(u.message)
+            if file_path:
+                media_paths.append(file_path)
+            if annotation:
+                content_parts.append(annotation)
+
+        content = "\n".join(content_parts) if content_parts else "[media group]"
+
+        logger.info(f"Processed media group {group_id}: {len(media_paths)} items")
+
+        await self._handle_message(
+            sender_id=sender_id,
+            chat_id=str(chat_id),
+            content=content,
+            media=media_paths,
+            metadata={
+                "message_id": first.message.message_id,
+                "media_group_id": group_id,
+                "user_id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "is_group": first.message.chat.type != "private",
             }
         )
     
