@@ -313,6 +313,7 @@ class TelegramChannel(BaseChannel):
         content = "\n".join(content_parts) if content_parts else "[media group]"
 
         logger.info(f"Processed media group {group_id}: {len(media_paths)} items")
+        logger.debug(f"Telegram message from {sender_id}: {content}...")
 
         await self._handle_message(
             sender_id=sender_id,
