@@ -8,6 +8,11 @@ from typing import Any
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 
+# Media type (from channels) → LLM content block type
+MEDIA_TYPE_TO_BLOCK: dict[str, str] = {
+    "image": "image_url",
+}
+
 
 class ContextBuilder:
     """
@@ -117,7 +122,7 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         history: list[dict[str, Any]],
         current_message: str,
         skill_names: list[str] | None = None,
-        media: list[str] | None = None,
+        media: list[dict[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
@@ -146,23 +151,34 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
 
         return messages
 
-    def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+    def _build_user_content(
+        self, text: str, media: list[dict[str, str]] | None
+    ) -> str | list[dict[str, Any]]:
+        """Build user message content with optional base64-encoded media."""
         if not media:
             return text
-        
-        images = []
-        for path in media:
-            p = Path(path)
-            mime, _ = mimetypes.guess_type(path)
-            if not p.is_file() or not mime or not mime.startswith("image/"):
+
+        content_blocks: list[dict[str, Any]] = []
+        for item in media:
+            block_type = MEDIA_TYPE_TO_BLOCK.get(item.get("type", ""))
+            if not block_type:
+                continue
+            p = Path(item.get("url", ""))
+            if not p.is_file():
+                continue
+            mime, _ = mimetypes.guess_type(str(p))
+            if not mime:
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
-            images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        
-        if not images:
+            content_blocks.append({
+                "type": block_type,
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+
+        if not content_blocks:
             return text
-        return images + [{"type": "text", "text": text}]
+        content_blocks.append({"type": "text", "text": text})
+        return content_blocks
     
     def add_tool_result(
         self,
