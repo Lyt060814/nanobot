@@ -1,6 +1,7 @@
 """Telegram channel implementation using python-telegram-bot."""
 
 import asyncio
+import mimetypes
 import re
 
 from loguru import logger
@@ -372,11 +373,21 @@ class TelegramChannel(BaseChannel):
         if mime_type:
             ext_map = {
                 "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+                "image/webp": ".webp", "image/bmp": ".bmp",
                 "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a",
+                "audio/wav": ".wav",
                 "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+                "application/pdf": ".pdf",
+                "text/plain": ".txt", "text/csv": ".csv",
+                "application/json": ".json",
+                "application/zip": ".zip",
             }
             if mime_type in ext_map:
                 return ext_map[mime_type]
+            # Fallback: derive extension from mime subtype (e.g. "application/xml" → ".xml")
+            ext = mimetypes.guess_extension(mime_type)
+            if ext:
+                return ext
 
         type_map = {"image": ".jpg", "voice": ".ogg", "audio": ".mp3", "video": ".mp4", "file": ""}
         return type_map.get(media_type, "")
