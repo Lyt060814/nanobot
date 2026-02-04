@@ -241,20 +241,18 @@ class TelegramChannel(BaseChannel):
         self._chat_ids[sender_id] = chat_id
 
         content_parts = []
-        media_paths = []
+        media_items = []
 
         if message.text:
             content_parts.append(message.text)
         if message.caption:
             content_parts.append(message.caption)
 
-        file_path, annotation = await self._download_media(message)
-        if file_path:
-            media_paths.append(file_path)
-        if annotation:
-            content_parts.append(annotation)
+        media_item = await self._download_media(message)
+        if media_item:
+            media_items.append(media_item)
 
-        content = "\n".join(content_parts) if content_parts else "[empty message]"
+        content = "\n".join(content_parts) if content_parts else ""
 
         logger.debug(f"Telegram message from {sender_id}: {content[:50]}...")
 
@@ -262,7 +260,7 @@ class TelegramChannel(BaseChannel):
             sender_id=sender_id,
             chat_id=str(chat_id),
             content=content,
-            media=media_paths,
+            media=media_items,
             metadata={
                 "message_id": message.message_id,
                 "user_id": user.id,
@@ -294,7 +292,7 @@ class TelegramChannel(BaseChannel):
         self._chat_ids[sender_id] = chat_id
 
         content_parts = []
-        media_paths = []
+        media_items = []
 
         # Extract caption (only one message in a group typically has it)
         for u in updates:
@@ -304,22 +302,20 @@ class TelegramChannel(BaseChannel):
 
         # Download all media items
         for u in updates:
-            file_path, annotation = await self._download_media(u.message)
-            if file_path:
-                media_paths.append(file_path)
-            if annotation:
-                content_parts.append(annotation)
+            media_item = await self._download_media(u.message)
+            if media_item:
+                media_items.append(media_item)
 
-        content = "\n".join(content_parts) if content_parts else "[media group]"
+        content = "\n".join(content_parts) if content_parts else ""
 
-        logger.info(f"Processed media group {group_id}: {len(media_paths)} items")
+        logger.info(f"Processed media group {group_id}: {len(media_items)} items")
         logger.debug(f"Telegram message from {sender_id}: {content}...")
 
         await self._handle_message(
             sender_id=sender_id,
             chat_id=str(chat_id),
             content=content,
-            media=media_paths,
+            media=media_items,
             metadata={
                 "message_id": first.message.message_id,
                 "media_group_id": group_id,
@@ -330,8 +326,8 @@ class TelegramChannel(BaseChannel):
             }
         )
     
-    async def _download_media(self, message) -> tuple[str | None, str | None]:
-        """Download media from a message. Returns (file_path, content_annotation)."""
+    async def _download_media(self, message) -> dict[str, str] | None:
+        """Download media from a message. Returns a media dict or None."""
         media_file = None
         media_type = None
 
@@ -352,7 +348,7 @@ class TelegramChannel(BaseChannel):
             media_type = "file"
 
         if not media_file or not self._app:
-            return None, None
+            return None
 
         try:
             file = await self._app.bot.get_file(media_file.file_id)
@@ -365,22 +361,11 @@ class TelegramChannel(BaseChannel):
             file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
             await file.download_to_drive(str(file_path))
 
-            # Handle voice/audio transcription
-            if media_type in ("voice", "audio"):
-                from nanobot.providers.transcription import GroqTranscriptionProvider
-                transcriber = GroqTranscriptionProvider(api_key=self.groq_api_key)
-                transcription = await transcriber.transcribe(file_path)
-                if transcription:
-                    logger.info(f"Transcribed {media_type}: {transcription[:50]}...")
-                    return str(file_path), f"[transcription: {transcription}]"
-                else:
-                    return str(file_path), f"[{media_type}: {file_path}]"
-
             logger.debug(f"Downloaded {media_type} to {file_path}")
-            return str(file_path), f"[{media_type}: {file_path}]"
+            return {"type": media_type, "url": str(file_path)}
         except Exception as e:
             logger.error(f"Failed to download media: {e}")
-            return None, f"[{media_type}: download failed]"
+            return None
 
     def _get_extension(self, media_type: str, mime_type: str | None) -> str:
         """Get file extension based on media type."""
