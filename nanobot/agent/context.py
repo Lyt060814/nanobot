@@ -11,6 +11,10 @@ from nanobot.agent.skills import SkillsLoader
 # Media type (from channels) → LLM content block type
 MEDIA_TYPE_TO_BLOCK: dict[str, str] = {
     "image": "image_url",
+    "video": "video_url",
+    "voice": "input_audio",
+    "audio": "input_audio",
+    "file": "file",
 }
 
 
@@ -154,7 +158,7 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
     def _build_user_content(
         self, text: str, media: list[dict[str, str]] | None
     ) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded media."""
+        """Build user message content with optional media attachments."""
         if not media:
             return text
 
@@ -166,14 +170,29 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
             p = Path(item.get("url", ""))
             if not p.is_file():
                 continue
+
             mime, _ = mimetypes.guess_type(str(p))
-            if not mime:
-                continue
             b64 = base64.b64encode(p.read_bytes()).decode()
-            content_blocks.append({
-                "type": block_type,
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
+
+            if block_type in ("image_url", "video_url"):
+                if not mime:
+                    continue
+                content_blocks.append({
+                    "type": block_type,
+                    block_type: {"url": f"data:{mime};base64,{b64}"},
+                })
+            elif block_type == "input_audio":
+                fmt = p.suffix.lstrip(".").lower()  # ".ogg" → "ogg"
+                content_blocks.append({
+                    "type": "input_audio",
+                    "input_audio": {"data": b64, "format": fmt},
+                })
+            elif block_type == "file":
+                file_mime = mime or "application/octet-stream"
+                content_blocks.append({
+                    "type": "file",
+                    "file": {"file_data": f"data:{file_mime};base64,{b64}"},
+                })
 
         if not content_blocks:
             return text
